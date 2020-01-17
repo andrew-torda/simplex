@@ -32,7 +32,7 @@ package simplex
 
 import (
 	"fmt"
-	"github.com/andrew-torda/goutil/matrix"
+	"github.com/andrew-torda/matrix"
 	"math"
 	"math/rand"
 	"os"
