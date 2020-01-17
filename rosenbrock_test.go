@@ -3,7 +3,7 @@ package simplex_test
 
 import (
 	"fmt"
-	. "github.com/andrew-torda//simplex"
+	. "github.com/andrew-torda/simplex"
 )
 
 // The Rosenbrock function is a classic example

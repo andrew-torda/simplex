@@ -4,7 +4,7 @@ package simplex_test
 
 import (
 	"fmt"
-	. "github.com/andrew-torda//simplex"
+	. "github.com/andrew-torda/simplex"
 	"math"
 	"math/rand"
 	"os"

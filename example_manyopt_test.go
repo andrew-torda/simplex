@@ -4,7 +4,7 @@ package simplex_test
 
 import (
 	"fmt"
-	"github.com/andrew-torda//simplex"
+	"github.com/andrew-torda/simplex"
 )
 
 func cost(x []float32) (float32, error) {
