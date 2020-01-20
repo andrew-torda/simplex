@@ -30,4 +30,4 @@ which would run the simplex two times with `maxsteps` steps each time. To get to
         fmt.Println("Did not converge")
     }
 
-Really, one shoul just `go doc -all` to see many more options.
+Really, one should just `go doc -all` to see many more options.
