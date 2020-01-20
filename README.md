@@ -17,7 +17,9 @@ This would have minima at `x[0] = 5` and `x[1] = 2`. It does not allow for error
 If you need additional arguments, you will need some kind of wrapper. Maybe you have some fixed arguments which are not to be optimized. A closure might be the best approach. There are lots of closures in the tests.
 
 You then need to make a simplex control argument
+
     s := NewSplxCtrl(cost, iniPrm, maxsteps)
+
 where `cost` is the cost function and iniPrm is a slice with initial parameters. Maybe it was set by a line like `iniPrm := []float32{10, 9}` which would set 10 and 9 as the initial values. `maxsteps` is the maximum number of steps. You then run the simplex with a line like
 
     result, err := s.Run(2)
