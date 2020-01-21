@@ -32,21 +32,12 @@ const (
 	MaxSteps               // Stopped after max steps
 	Bust                   // Stopped after an error
 )
-
 const (
 	randSeed         = 1637    // default seed for permuting
 	alpha    float32 = 1       // Literature values for
 	beta     float32 = -1 / 2. // moving the worst vertex in
 	gamma    float32 = -2      // the simplex
 )
-
-// let's add
-//  - filename for min and max values
-//  - trajectory slices - for storing and printing out our trajectory.
-// cost is the cost function, but testfun lets us invoke something
-// (probably the same basic function), but perhaps on a test data
-// set.
-//
 
 // CostFun is the function to be optimised. It must accept a slice of
 // floats and return a single float as the answer as well as an
@@ -94,28 +85,6 @@ func NewSplxCtrl(cost CostFun, iniPrm []float32, maxstep int32) *SplxCtrl {
 	return s
 }
 
-// Result is the structure used to pass results back to the caller
-//
-// We are told the number of cycles used, the final best parameters
-// (BestPrm) and the reason for stopping.
-type Result struct {
-	Ncycle     int32     // How many times did we cycle
-	BestPrm    []float32 // best parameters found
-	StopReason uint8     // Reason why calculation stopped
-}
-
-// checklen is used in the set functions which take a slice (usually of float32's).
-func checklen(name string, got []float32, want []float32) error {
-	ngot := len(got)
-	nwant := len(want)
-	if ngot != nwant {
-		e := fmt.Errorf("check param \"name\". Len mismatch. Got %d. Want %d",
-			ngot, nwant)
-		return e
-	}
-	return nil
-}
-
 // Testfun adds a testfunction to the control structure. Every time we
 // improve the best point in the simplex, we invoke this
 // function. This lets us do bootstrapping.
@@ -126,7 +95,7 @@ func (s *SplxCtrl) Testfun(c CostFun, fname string) {
 }
 
 // Initype sets the initialisation to either classic or spread points. Call it
-// as s.Initype (simplex.IniClassic) or s.Initype (simplex.IniPntSpread)
+// as s.Initype (simplex.IniClassic) or s.IniType (simplex.IniPntSpread)
 func (s *SplxCtrl) IniType(i iniType) { s.iniType = i }
 
 // verbosity
@@ -191,11 +160,6 @@ func (s *SplxCtrl) Lower(lower []float32) error {
 	return nil
 }
 
-// splx is a dynamically allocated matrix from the matrix package.
-type splx struct {
-	*matrix.FMatrix2d
-}
-
 // inipntClassic does a classic initialisation of the simplex. The first point
 // is at the starting place. Subsequent vertices at p_i = p_0 + lambda*e_i
 // where e_i is a unit in that dimension.
@@ -252,6 +216,181 @@ func (s *SplxCtrl) iniPoints() splx {
 	}
 	return splx
 }
+
+// onerun is the inner call to the simplex. It is called on each start
+// and restart.
+func (s *SplxCtrl) onerun(sWk *sWk) (uint8, error) {
+	ndim := len(s.iniPrm)
+	npnt := ndim + 1
+	splx := s.iniPoints()
+
+	if err := sWk.setupFirstStep(splx); err != nil {
+		return Bust, fmt.Errorf("Setting up for first step: %w", err)
+	}
+	stopReason := MaxSteps
+	sWk.ncycle = s.maxstep
+	for n := int32(0); n < s.maxstep; n++ {
+		var err error
+		oldlo := sWk.rank[npnt-1] // old best point
+		sort.Slice(sWk.rank, func(i, j int) bool {
+			return sWk.y[sWk.rank[i]] > sWk.y[sWk.rank[j]]
+		})
+		ilo := sWk.rank[npnt-1] // best point
+		i2nd := sWk.rank[1]     // second best
+		ihi := sWk.rank[0]      // worst (hi) point
+		if sWk.hstryF != nil || sWk.testF != nil {
+			if oldlo != ilo {
+				if err = sWk.history(n, splx); err != nil {
+					return Bust, err
+				}
+			}
+		}
+		if sWk.converged(splx, s.tol, s.pTol) {
+			sWk.ncycle = n
+			stopReason = Converged
+			break
+		}
+		sWk.centroid(splx)
+		var yr, ye, yc float32
+		cndt := splx.Mat[ihi]
+		if yr, err = amotry(alpha, sWk, cndt); err != nil {
+			return Bust, err
+		}
+
+		if yr < sWk.y[i2nd] { //  either accept or try extension
+			accept(splx, sWk, sWk.ptrial, yr)
+			if yr >= sWk.y[ilo] {
+				continue
+			}
+			if ye, err = amotry(gamma, sWk, cndt); err != nil { // try extend
+				return Bust, err
+			}
+			if ye < yr {
+				accept(splx, sWk, sWk.ptrial, ye)
+			}
+			continue
+		} // Now the cases involving contraction
+		if yr < sWk.y[ihi] { // outside contraction
+			yc, _ = amotry(beta, sWk, sWk.ptrial) // use reflected point
+			if yc <= yr {                         // for contraction
+				accept(splx, sWk, sWk.ptrial, yc)
+				continue
+			}
+		} else { // inside 1D contraction
+			ycc, _ := amotry(beta, sWk, splx.Mat[ihi]) // use the original
+			if ycc < sWk.y[ihi] {                      // high point
+				accept(splx, sWk, sWk.ptrial, ycc)
+				continue
+			}
+		}
+
+		contract(splx, sWk) // last option, general contraction
+		sWk.updateContract(splx)
+	}
+	ilo := sWk.rank[npnt-1]
+	copy(s.iniPrm, splx.Mat[ilo])
+	return stopReason, nil
+}
+
+// setupBounds is a wrapper (closure) around the original cost function.
+// If a point exceeds a bound, we return maxfloat32 which means the point
+// will be rejected.
+// We only need to return the function value at the worst point + some
+// positive delta, but this would require passing extra information into
+// the cost function.
+func (s *SplxCtrl) setupBounds() {
+	if s.lower == nil && s.upper == nil {
+		return // if we do not have any bounds, we do not need the wrapper
+	}
+	origCost := s.cost
+	cost := func(x []float32) (float32, error) {
+		if s.upper != nil {
+			for i, v := range s.upper {
+				if x[i] > v {
+					return math.MaxFloat32, nil
+				}
+			}
+		}
+		if s.lower != nil {
+			for i, v := range s.lower {
+				if x[i] < v {
+					return math.MaxFloat32, nil
+				}
+			}
+		}
+		return origCost(x)
+	}
+	s.cost = cost
+}
+
+// Run invokes the simplex maxstart times. Returns a structure of type
+// Result and an error.
+func (s *SplxCtrl) Run(maxstart int) (Result, error) {
+	var sWk sWk
+	var err error
+	errRes := Result{BestPrm: nil, Ncycle: 0, StopReason: Bust}
+	ndim := len(s.iniPrm)
+	s.setupBounds()
+	sWk.init(ndim, s.cost) // move the copying of testfun here
+	s.cost = nil           // pointer has now been handed to the sWk structure
+	if s.hstryFname != "" {
+		if sWk.hstryF, err = os.Create(s.hstryFname); err != nil {
+			return errRes, err
+		}
+		defer sWk.hstryF.Close()
+	}
+	sWk.testfun = s.testfun
+	s.testfun = nil
+	if sWk.testfun != nil {
+		if sWk.testF, err = os.Create(s.testFname); err != nil {
+			return errRes, err
+		}
+		defer sWk.testF.Close()
+	}
+	var stopReason uint8
+	for mr := 0; mr < maxstart; mr++ {
+		if stopReason, err = s.onerun(&sWk); err != nil {
+			return errRes, err
+		}
+		for i, v := range s.span {
+			s.span[i] = v / 2. // halve the range before next restart
+		}
+	}
+	result := Result{
+		BestPrm:    s.iniPrm,
+		Ncycle:     sWk.ncycle,
+		StopReason: stopReason,
+	}
+	return result, nil
+}
+
+// Result is the structure used to pass results back to the caller
+//
+// We are told the number of cycles used, the final best parameters
+// (BestPrm) and the reason for stopping.
+type Result struct {
+	Ncycle     int32     // How many times did we cycle
+	BestPrm    []float32 // best parameters found
+	StopReason uint8     // Reason why calculation stopped
+}
+
+// checklen is used in the set functions which take a slice (usually of float32's).
+func checklen(name string, got []float32, want []float32) error {
+	ngot := len(got)
+	nwant := len(want)
+	if ngot != nwant {
+		e := fmt.Errorf("check param \"name\". Len mismatch. Got %d. Want %d",
+			ngot, nwant)
+		return e
+	}
+	return nil
+}
+
+// splx is a dynamically allocated matrix from the matrix package.
+type splx struct {
+	*matrix.FMatrix2d
+}
+
 
 // sWk holds the scratch arrays for sums and ranks.
 type sWk struct {
@@ -437,155 +576,4 @@ func (sWk sWk) history(ncycle int32, splx splx) (err error) {
 		fmt.Fprintf(sWk.testF, "\n")
 	}
 	return err
-}
-
-// onerun is the inner call to the simplex. It is called on each start
-// and restart.
-func (s *SplxCtrl) onerun(sWk *sWk) (uint8, error) {
-	ndim := len(s.iniPrm)
-	npnt := ndim + 1
-	splx := s.iniPoints()
-
-	if err := sWk.setupFirstStep(splx); err != nil {
-		return Bust, fmt.Errorf("Setting up for first step: %w", err)
-	}
-	stopReason := MaxSteps
-	sWk.ncycle = s.maxstep
-	for n := int32(0); n < s.maxstep; n++ {
-		var err error
-		oldlo := sWk.rank[npnt-1] // old best point
-		sort.Slice(sWk.rank, func(i, j int) bool {
-			return sWk.y[sWk.rank[i]] > sWk.y[sWk.rank[j]]
-		})
-		ilo := sWk.rank[npnt-1] // best point
-		i2nd := sWk.rank[1]     // second best
-		ihi := sWk.rank[0]      // worst (hi) point
-		if sWk.hstryF != nil || sWk.testF != nil {
-			if oldlo != ilo {
-				if err = sWk.history(n, splx); err != nil {
-					return Bust, err
-				}
-			}
-		}
-		stopmaybe := func() {}
-		if n > 90 {
-			stopmaybe()
-		}
-		if sWk.converged(splx, s.tol, s.pTol) {
-			sWk.ncycle = n
-			stopReason = Converged
-			break
-		}
-		sWk.centroid(splx)
-		var yr, ye, yc float32
-		cndt := splx.Mat[ihi]
-		if yr, err = amotry(alpha, sWk, cndt); err != nil {
-			return Bust, err
-		}
-
-		if yr < sWk.y[i2nd] { //  either accept or try extension
-			accept(splx, sWk, sWk.ptrial, yr)
-			if yr >= sWk.y[ilo] {
-				continue
-			}
-			if ye, err = amotry(gamma, sWk, cndt); err != nil { // try extend
-				return Bust, err
-			}
-			if ye < yr {
-				accept(splx, sWk, sWk.ptrial, ye)
-			}
-			continue
-		} // Now the cases involving contraction
-		if yr < sWk.y[ihi] { // outside contraction
-			yc, _ = amotry(beta, sWk, sWk.ptrial)
-			if yc <= yr {
-				accept(splx, sWk, sWk.ptrial, yc)
-				continue
-			}
-		} else { // inside 1D contraction
-			ycc, _ := amotry(beta, sWk, splx.Mat[ihi]) // Have I got sign right ?
-			if ycc < sWk.y[ihi] {
-				accept(splx, sWk, sWk.ptrial, ycc)
-				continue
-			}
-		}
-
-		contract(splx, sWk) // last option, general contraction
-		sWk.updateContract(splx)
-	}
-	ilo := sWk.rank[npnt-1]
-	copy(s.iniPrm, splx.Mat[ilo])
-	return stopReason, nil
-}
-
-// setupBounds is a wrapper (closure) around the original cost function.
-// If a point exceeds a bound, we return maxfloat32 which means the point
-// will be rejected.
-// We only need to return the function value at the worst point + some
-// positive delta, but this would require passing extra information into
-// the cost function.
-func (s *SplxCtrl) setupBounds() {
-	if s.lower == nil && s.upper == nil {
-		return // if we do not have any bounds, we do not need the wrapper
-	}
-	origCost := s.cost
-	cost := func(x []float32) (float32, error) {
-		if s.upper != nil {
-			for i, v := range s.upper {
-				if x[i] > v {
-					return math.MaxFloat32, nil
-				}
-			}
-		}
-		if s.lower != nil {
-			for i, v := range s.lower {
-				if x[i] < v {
-					return math.MaxFloat32, nil
-				}
-			}
-		}
-		return origCost(x)
-	}
-	s.cost = cost
-}
-
-// Run invokes the simplex maxstart times. Returns a structure of type
-// Result and an error.
-func (s *SplxCtrl) Run(maxstart int) (Result, error) {
-	var sWk sWk
-	var err error
-	errRes := Result{BestPrm: nil, Ncycle: 0, StopReason: Bust}
-	ndim := len(s.iniPrm)
-	s.setupBounds()
-	sWk.init(ndim, s.cost) // move the copying of testfun here
-	s.cost = nil           // pointer has now been handed to the sWk structure
-	if s.hstryFname != "" {
-		if sWk.hstryF, err = os.Create(s.hstryFname); err != nil {
-			return errRes, err
-		}
-		defer sWk.hstryF.Close()
-	}
-	sWk.testfun = s.testfun
-	s.testfun = nil
-	if sWk.testfun != nil {
-		if sWk.testF, err = os.Create(s.testFname); err != nil {
-			return errRes, err
-		}
-		defer sWk.testF.Close()
-	}
-	var stopReason uint8
-	for mr := 0; mr < maxstart; mr++ {
-		if stopReason, err = s.onerun(&sWk); err != nil {
-			return errRes, err
-		}
-		for i, v := range s.span {
-			s.span[i] = v / 2. // halve the range before next restart
-		}
-	}
-	result := Result{
-		BestPrm:    s.iniPrm,
-		Ncycle:     sWk.ncycle,
-		StopReason: stopReason,
-	}
-	return result, nil
 }

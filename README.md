@@ -31,3 +31,13 @@ which would run the simplex two times with `maxsteps` steps each time. To get to
     }
 
 Really, one should just `go doc -all` to see many more options.
+
+## Differences compared to literature
+
+### errors
+
+Every time we call the cost function, we check for errors. This is a bit unusual since most peoples functions do not break. We have however had cost functions which involve opening and playing with lots of files and doing things that occasionally explode. In case of an error, it will bubble back up to the caller. Most simple numerical functions do not need this, so they can return `x, nil` instead of just `x`.
+
+### Initialisation
+The default is to initialise as per the literature. You have a starting point and each subsequent point has a typical length added in exactly one dimension. Alternatively, you can have the simplex surround the initial point. If you have two parameters, this would be a triangle with the start point at its centre.
+From `go doc -all`, look for the paragraph on initialisation.
