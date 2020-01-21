@@ -1,7 +1,7 @@
 // License ? what license ?
 
 /*
-Package simplex implements the Nelder-Meade simplex optimizer.
+Package simplex implements the Nelder-Mead simplex optimizer.
 It follows the original paper
    J.A. Nelder, R. Mead (1965), Comp. J., 7, 308-313
 

@@ -1,4 +1,4 @@
-// Package seq provides a simplex (Nelder and Meade) optimizer.
+// Package seq provides a simplex (Nelder and Mead) optimizer.
 package simplex
 
 import (
